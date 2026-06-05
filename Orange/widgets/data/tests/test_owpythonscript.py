@@ -240,6 +240,23 @@ class TestOWPythonScript(WidgetTest):
         })
         self.assertEqual(w.libraryListSource[0].name, "A")
 
+    def test_restore_selected_icon(self):
+        icon_widget = OWPythonScript._available_icon_descriptions()[0].qualified_name
+        w = self.create_widget(OWPythonScript, {
+            "selectedIconWidget": icon_widget,
+            "__version__": 2
+        })
+        self.assertEqual(w.selectedIconWidget, icon_widget)
+        self.assertEqual(w.icon_combo.currentData(), icon_widget)
+
+    def test_unknown_selected_icon_falls_back_to_default(self):
+        w = self.create_widget(OWPythonScript, {
+            "selectedIconWidget": "missing.widget.Icon",
+            "__version__": 2
+        })
+        self.assertEqual(w.selectedIconWidget, "")
+        self.assertEqual(w.icon_combo.currentData(), "")
+
     def test_no_shared_namespaces(self):
         """
         Previously, Python Script widgets in the same schema shared a namespace.

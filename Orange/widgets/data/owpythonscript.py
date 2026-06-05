@@ -1,12 +1,14 @@
 import sys
 import os
 import code
+import copy
 import itertools
 import tokenize
 import unicodedata
+from collections import Counter
 from unittest.mock import patch
 
-from typing import Optional, List, Dict, Any, TYPE_CHECKING
+from typing import Optional, List, Dict, Any, TYPE_CHECKING, Tuple
 
 import pygments.style
 from pygments.token import Comment, Keyword, Number, String, Punctuation, Operator, Error, Name
@@ -15,18 +17,21 @@ from qtconsole.pygments_highlighter import PygmentsHighlighter
 from AnyQt.QtWidgets import (
     QPlainTextEdit, QListView, QSizePolicy, QMenu, QSplitter, QLineEdit,
     QAction, QToolButton, QFileDialog, QStyledItemDelegate,
-    QStyleOptionViewItem, QPlainTextDocumentLayout,
+    QStyleOptionViewItem, QPlainTextDocumentLayout, QComboBox,
     QLabel, QWidget, QHBoxLayout, QApplication)
 from AnyQt.QtGui import (
     QColor, QBrush, QPalette, QFont, QTextDocument, QTextCharFormat,
-    QTextCursor, QKeySequence, QFontMetrics, QPainter
+    QTextCursor, QKeySequence, QFontMetrics, QPainter, QIcon
 )
 from AnyQt.QtCore import (
-    Qt, QByteArray, QItemSelectionModel, QSize, QRectF, QMimeDatabase,
+    Qt, QByteArray, QItemSelectionModel, QSize, QRectF, QMimeDatabase, QTimer,
 )
 
+from orangecanvas.registry import WidgetRegistry
+from orangecanvas.resources import icon_loader
 from orangewidget.workflow.drophandler import SingleFileDropHandler
 
+from Orange.canvas.config import Config
 from Orange.data import Table
 from Orange.base import Learner, Model
 from Orange.util import interleave
@@ -560,6 +565,9 @@ class OWPythonScript(OWWidget):
     splitterState: Optional[bytes] = Setting(None)
 
     vimModeEnabled = Setting(False)
+    selectedIconWidget = Setting("")
+    _icon_descriptions: Optional[List[Any]] = None
+    _icon_description_by_qname: Optional[Dict[str, Any]] = None
 
     class Error(OWWidget.Error):
         pass
@@ -671,6 +679,15 @@ class OWPythonScript(OWWidget):
             self.vim_indicator.indicator_text = text
             self.vim_indicator.update()
 
+        icon_box = gui.hBox(self.editor_controls, spacing=4)
+        icon_box.layout().addWidget(QLabel("Icon:", icon_box))
+        self.icon_combo = QComboBox(icon_box)
+        self.icon_combo.setToolTip("Choose icon from another widget")
+        icon_box.layout().addWidget(self.icon_combo)
+        self._populate_icon_combo()
+        self.icon_combo.currentIndexChanged.connect(self._on_icon_changed)
+        self._default_window_icon = QIcon()
+
         # Library
 
         self.libraryListSource = []
@@ -761,6 +778,7 @@ class OWPythonScript(OWWidget):
 
         self._restoreState()
         self.settingsAboutToBePacked.connect(self._saveState)
+        QTimer.singleShot(0, self._apply_selected_icon)
 
     def sizeHint(self) -> QSize:
         return super().sizeHint().expandedTo(QSize(800, 600))
@@ -783,6 +801,95 @@ class OWPythonScript(OWWidget):
         self.scriptLibrary = [s.asdict() for s in self.libraryListSource]
         self.scriptText = self.text.toPlainText()
         self.splitterState = bytes(self.splitCanvas.saveState())
+
+    @classmethod
+    def _available_icon_descriptions(cls) -> List[Any]:
+        if cls._icon_descriptions is not None:
+            return cls._icon_descriptions
+
+        descriptions = []
+        by_qname = {}
+        try:
+            discovery = Config.widget_discovery(WidgetRegistry())
+            discovery.run(Config.widgets_entry_points())
+            descriptions = [
+                d for d in discovery.registry.widgets()
+                if d.icon and d.qualified_name != f"{cls.__module__}.{cls.__name__}"
+            ]
+            descriptions.sort(key=lambda d: (d.name.lower(), d.qualified_name))
+            by_qname = {d.qualified_name: d for d in descriptions}
+        except Exception:
+            pass
+
+        cls._icon_descriptions = descriptions
+        cls._icon_description_by_qname = by_qname
+        return descriptions
+
+    def _populate_icon_combo(self):
+        descriptions = self._available_icon_descriptions()
+        name_counts = Counter(desc.name for desc in descriptions)
+        self.icon_combo.addItem("Default (Python Script)", "")
+        for desc in descriptions:
+            label = desc.name
+            if name_counts[label] > 1:
+                label = f"{label} ({desc.qualified_name})"
+            icon = icon_loader.from_description(desc).get(desc.icon)
+            self.icon_combo.addItem(icon, label, desc.qualified_name)
+
+        index = self.icon_combo.findData(self.selectedIconWidget)
+        if index < 0:
+            self.selectedIconWidget = ""
+            index = 0
+        self.icon_combo.setCurrentIndex(index)
+
+    def _on_icon_changed(self, _index):
+        self.selectedIconWidget = self.icon_combo.currentData() or ""
+        self._apply_selected_icon()
+
+    def _apply_selected_icon(self):
+        if self._default_window_icon.isNull() and not self.windowIcon().isNull():
+            self._default_window_icon = self.windowIcon()
+
+        desc_by_qname = self._icon_description_by_qname or {}
+        desc = desc_by_qname.get(self.selectedIconWidget)
+        if desc is not None:
+            icon = icon_loader.from_description(desc).get(desc.icon)
+            self.setWindowIcon(icon)
+        elif not self._default_window_icon.isNull():
+            self.setWindowIcon(self._default_window_icon)
+
+        self._update_canvas_node_icon(desc.icon if desc is not None else self.icon)
+
+    def _update_canvas_node_icon(self, icon_path):
+        signal_manager = getattr(self, "signalManager", None)
+        if signal_manager is None or not hasattr(signal_manager, "scheme"):
+            return
+        scheme = signal_manager.scheme()
+        if scheme is None or not hasattr(scheme, "node_for_widget"):
+            return
+        node = scheme.node_for_widget(self)
+        if node is None:
+            return
+
+        desc = copy.copy(node.description)
+        desc.icon = icon_path
+        node.description = desc
+
+        try:
+            from orangecanvas.document.schemeedit import SchemeEditWidget
+        except ImportError:
+            return
+        app = QApplication.instance()
+        if app is None:
+            return
+        for widget in app.topLevelWidgets():
+            for editor in widget.findChildren(SchemeEditWidget):
+                if editor.scheme() is scheme:
+                    scene = editor.scene()
+                    item = scene.item_for_node(node) if scene is not None else None
+                    if item is not None:
+                        item.setWidgetDescription(desc)
+                    return
 
     def set_input(self, index, obj, signal):
         dic = getattr(self, signal)

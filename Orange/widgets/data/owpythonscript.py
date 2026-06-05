@@ -565,16 +565,18 @@ class OWPythonScript(OWWidget):
     splitterState: Optional[bytes] = Setting(None)
 
     vimModeEnabled = Setting(False)
-    selectedIconWidget = Setting("")
     _icon_descriptions: Optional[List[Any]] = None
     _icon_description_by_qname: Optional[Dict[str, Any]] = None
     _category_description_by_name: Optional[Dict[str, Any]] = None
+    _last_applied_icon: Optional[str] = None
 
     class Error(OWWidget.Error):
         pass
 
     def __init__(self):
         super().__init__()
+        self._last_applied_icon = None
+        self.selectedIconWidget = ""
 
         for name in self.signal_names:
             setattr(self, name, [])
@@ -835,6 +837,8 @@ class OWPythonScript(OWWidget):
     def _populate_icon_combo(self):
         descriptions = self._available_icon_descriptions()
         name_counts = Counter(desc.name for desc in descriptions)
+        self.icon_combo.blockSignals(True)
+        self.icon_combo.clear()
         self.icon_combo.addItem("Default (Python Script)", "")
         for desc in descriptions:
             label = desc.name
@@ -848,12 +852,29 @@ class OWPythonScript(OWWidget):
             self.selectedIconWidget = ""
             index = 0
         self.icon_combo.setCurrentIndex(index)
+        self.icon_combo.blockSignals(False)
 
     def _on_icon_changed(self, _index):
-        self.selectedIconWidget = self.icon_combo.currentData() or ""
-        self._apply_selected_icon()
+        new_selection = self.icon_combo.currentData() or ""
+        if new_selection != self.selectedIconWidget:
+            self.selectedIconWidget = new_selection
+            # Si se seleccionó un icono diferente, crear un nuevo widget con ese icono
+            if new_selection:
+                self._create_new_widget_with_selected_icon()
+            else:
+                self._apply_selected_icon()
 
     def _apply_selected_icon(self):
+        # Si el widget ya tiene un icono personalizado en el canvas, no lo cambies
+        signal_manager = getattr(self, "signalManager", None)
+        if signal_manager is not None and hasattr(signal_manager, "scheme"):
+            scheme = signal_manager.scheme()
+            if scheme is not None and hasattr(scheme, "node_for_widget"):
+                node = scheme.node_for_widget(self)
+                if node is not None and node.description.icon and node.description.icon != "":
+                    # El widget ya tiene un icono personalizado en el canvas, no lo sobrescribas
+                    return
+
         if self._default_window_icon.isNull() and not self.windowIcon().isNull():
             self._default_window_icon = self.windowIcon()
 
@@ -868,6 +889,11 @@ class OWPythonScript(OWWidget):
         self._update_canvas_node_appearance(desc)
 
     def _update_canvas_node_appearance(self, selected_desc):
+        new_icon = selected_desc.icon if selected_desc is not None else self.icon
+        if self._last_applied_icon == new_icon:
+            return
+        self._last_applied_icon = new_icon
+
         signal_manager = getattr(self, "signalManager", None)
         if signal_manager is None or not hasattr(signal_manager, "scheme"):
             return
@@ -878,22 +904,25 @@ class OWPythonScript(OWWidget):
         if node is None:
             return
 
-        desc = copy.copy(node.description)
-        if selected_desc is not None:
-            desc.icon = selected_desc.icon
-            desc.package = selected_desc.package
-            desc.project_name = selected_desc.project_name
-            desc.category = selected_desc.category
-        else:
-            desc.icon = self.icon
-            desc.package = self.__module__.rsplit(".", 1)[0]
-            desc.category = self.category
-        node.description = desc
-
         try:
             from orangecanvas.document.schemeedit import SchemeEditWidget
         except ImportError:
             return
+
+        # Create a copy of the description to avoid sharing references
+        if selected_desc is not None:
+            desc = copy.deepcopy(selected_desc)
+        else:
+            # Restore to original Python Script description
+            desc = self._get_original_description()
+            if desc is not None:
+                desc = copy.deepcopy(desc)
+
+        if desc is None:
+            return
+
+        node.description = desc
+
         app = QApplication.instance()
         if app is None:
             return
@@ -903,18 +932,70 @@ class OWPythonScript(OWWidget):
                     scene = editor.scene()
                     item = scene.item_for_node(node) if scene is not None else None
                     if item is not None:
+                        # Force a fresh description update
                         item.setWidgetDescription(desc)
-                        category_name = (
-                            selected_desc.category
-                            if selected_desc is not None
-                            else self.category
-                        )
-                        category_desc = (
-                            self._category_description_by_name or {}
-                        ).get(category_name)
-                        if category_desc is not None:
-                            item.setWidgetCategory(category_desc)
                     return
+
+    def _get_original_description(self):
+        try:
+            registry = WidgetRegistry()
+            discovery = Config.widget_discovery(registry)
+            discovery.run(Config.widgets_entry_points())
+            for d in discovery.registry.widgets():
+                if d.qualified_name == f"{self.__module__}.{self.__class__.__name__}":
+                    return d
+        except Exception:
+            pass
+        return None
+
+    def _create_new_widget_with_selected_icon(self):
+        try:
+            signal_manager = getattr(self, "signalManager", None)
+            if signal_manager is None or not hasattr(signal_manager, "scheme"):
+                return
+
+            scheme = signal_manager.scheme()
+            if scheme is None:
+                return
+
+            # Obtener descripción del widget seleccionado para el icono
+            desc_by_qname = self._icon_description_by_qname or {}
+            selected_desc = desc_by_qname.get(self.selectedIconWidget)
+            if selected_desc is None:
+                return
+
+            # Obtener la descripción del Python Script actual
+            current_node = scheme.node_for_widget(self)
+            if current_node is None:
+                return
+
+            current_desc = current_node.description
+
+            # Crear una descripción modificada del Python Script con el icono seleccionado
+            modified_desc = copy.deepcopy(current_desc)
+
+            # Verificar que el icono es válido antes de asignarlo
+            if selected_desc.icon:
+                modified_desc.icon = selected_desc.icon
+                # También copiar el package para que pueda encontrar los recursos
+                modified_desc.package = selected_desc.package
+
+            # Mantener la categoría del widget seleccionado también
+            modified_desc.category = selected_desc.category
+
+            # Crear un nuevo nodo con la descripción modificada
+            new_node = scheme.new_node(modified_desc)
+
+            # Posicionar cerca del widget actual
+            pos = current_node.position
+            new_node.position = (pos[0] + 100, pos[1] + 100)
+
+            # Eliminar el widget actual
+            scheme.remove_node(current_node)
+
+        except Exception:
+            import traceback
+            traceback.print_exc()
 
     def set_input(self, index, obj, signal):
         dic = getattr(self, signal)

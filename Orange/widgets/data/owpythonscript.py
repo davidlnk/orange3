@@ -568,6 +568,7 @@ class OWPythonScript(OWWidget):
     selectedIconWidget = Setting("")
     _icon_descriptions: Optional[List[Any]] = None
     _icon_description_by_qname: Optional[Dict[str, Any]] = None
+    _category_description_by_name: Optional[Dict[str, Any]] = None
 
     class Error(OWWidget.Error):
         pass
@@ -809,6 +810,7 @@ class OWPythonScript(OWWidget):
 
         descriptions = []
         by_qname = {}
+        by_category = {}
         try:
             discovery = Config.widget_discovery(WidgetRegistry())
             discovery.run(Config.widgets_entry_points())
@@ -818,11 +820,16 @@ class OWPythonScript(OWWidget):
             ]
             descriptions.sort(key=lambda d: (d.name.lower(), d.qualified_name))
             by_qname = {d.qualified_name: d for d in descriptions}
+            by_category = {
+                category.name: category
+                for category in discovery.registry.categories()
+            }
         except Exception:
             pass
 
         cls._icon_descriptions = descriptions
         cls._icon_description_by_qname = by_qname
+        cls._category_description_by_name = by_category
         return descriptions
 
     def _populate_icon_combo(self):
@@ -858,9 +865,9 @@ class OWPythonScript(OWWidget):
         elif not self._default_window_icon.isNull():
             self.setWindowIcon(self._default_window_icon)
 
-        self._update_canvas_node_icon(desc.icon if desc is not None else self.icon)
+        self._update_canvas_node_appearance(desc)
 
-    def _update_canvas_node_icon(self, icon_path):
+    def _update_canvas_node_appearance(self, selected_desc):
         signal_manager = getattr(self, "signalManager", None)
         if signal_manager is None or not hasattr(signal_manager, "scheme"):
             return
@@ -872,7 +879,15 @@ class OWPythonScript(OWWidget):
             return
 
         desc = copy.copy(node.description)
-        desc.icon = icon_path
+        if selected_desc is not None:
+            desc.icon = selected_desc.icon
+            desc.package = selected_desc.package
+            desc.project_name = selected_desc.project_name
+            desc.category = selected_desc.category
+        else:
+            desc.icon = self.icon
+            desc.package = self.__module__.rsplit(".", 1)[0]
+            desc.category = self.category
         node.description = desc
 
         try:
@@ -889,6 +904,16 @@ class OWPythonScript(OWWidget):
                     item = scene.item_for_node(node) if scene is not None else None
                     if item is not None:
                         item.setWidgetDescription(desc)
+                        category_name = (
+                            selected_desc.category
+                            if selected_desc is not None
+                            else self.category
+                        )
+                        category_desc = (
+                            self._category_description_by_name or {}
+                        ).get(category_name)
+                        if category_desc is not None:
+                            item.setWidgetCategory(category_desc)
                     return
 
     def set_input(self, index, obj, signal):

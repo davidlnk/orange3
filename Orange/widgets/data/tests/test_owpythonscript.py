@@ -4,6 +4,7 @@
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from AnyQt.QtCore import QMimeData, QPoint, Qt, QUrl
@@ -256,6 +257,71 @@ class TestOWPythonScript(WidgetTest):
         })
         self.assertEqual(w.selectedIconWidget, "")
         self.assertEqual(w.icon_combo.currentData(), "")
+
+    def test_selected_icon_updates_canvas_node_description(self):
+        selected_desc = next(
+            desc for desc in OWPythonScript._available_icon_descriptions()
+            if desc.category == "Model"
+        )
+        node = SimpleNamespace(
+            description=SimpleNamespace(
+                icon="icons/PythonScript.svg",
+                package="Orange.widgets.data",
+                project_name="Orange3",
+                category="Transform",
+            )
+        )
+        scheme = SimpleNamespace(node_for_widget=lambda _widget: node)
+        self.widget.signalManager = SimpleNamespace(scheme=lambda: scheme)
+        item = SimpleNamespace(
+            setWidgetDescription=lambda desc: setattr(item, "description", desc),
+            setWidgetCategory=lambda category: setattr(item, "category", category),
+        )
+        scene = SimpleNamespace(item_for_node=lambda _node: item)
+        editor = SimpleNamespace(scheme=lambda: scheme, scene=lambda: scene)
+        top_level = SimpleNamespace(findChildren=lambda _klass: [editor])
+        app = SimpleNamespace(topLevelWidgets=lambda: [top_level])
+
+        with patch("Orange.widgets.data.owpythonscript.QApplication.instance",
+                   return_value=app):
+            self.widget._update_canvas_node_appearance(selected_desc)
+
+        self.assertEqual(node.description.icon, selected_desc.icon)
+        self.assertEqual(node.description.package, selected_desc.package)
+        self.assertEqual(node.description.category, selected_desc.category)
+        self.assertEqual(item.category.name, selected_desc.category)
+
+    def test_default_icon_restores_canvas_node_description(self):
+        node = SimpleNamespace(
+            description=SimpleNamespace(
+                icon="icons/SVM.svg",
+                package="Orange.widgets.model",
+                project_name="Orange3",
+                category="Model",
+            )
+        )
+        scheme = SimpleNamespace(node_for_widget=lambda _widget: node)
+        self.widget.signalManager = SimpleNamespace(scheme=lambda: scheme)
+        item = SimpleNamespace(
+            setWidgetDescription=lambda desc: setattr(item, "description", desc),
+            setWidgetCategory=lambda category: setattr(item, "category", category),
+        )
+        scene = SimpleNamespace(item_for_node=lambda _node: item)
+        editor = SimpleNamespace(scheme=lambda: scheme, scene=lambda: scene)
+        top_level = SimpleNamespace(findChildren=lambda _klass: [editor])
+        app = SimpleNamespace(topLevelWidgets=lambda: [top_level])
+
+        with patch("Orange.widgets.data.owpythonscript.QApplication.instance",
+                   return_value=app):
+            self.widget._update_canvas_node_appearance(None)
+
+        self.assertEqual(node.description.icon, self.widget.icon)
+        self.assertEqual(
+            node.description.package,
+            self.widget.__module__.rsplit(".", 1)[0]
+        )
+        self.assertEqual(node.description.category, self.widget.category)
+        self.assertEqual(item.category.name, self.widget.category)
 
     def test_no_shared_namespaces(self):
         """
